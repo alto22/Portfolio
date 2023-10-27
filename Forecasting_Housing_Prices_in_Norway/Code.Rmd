@@ -1,0 +1,817 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Import libraries ##
+```{r}
+#Sys.setenv(LANG="en")
+#Sys.setlocale("LC_TIME","English")
+library(fpp3)
+library("AER")
+library(reshape2)
+library(gridExtra)
+library(urca)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+library(readr)
+library(tsibble)
+library(ggfortify)
+library(forecast)
+library(strucchange)
+```
+
+
+### Load Data ###
+```{r}
+
+data <- read_delim('data.csv', delim = ';', col_types = cols(date = col_character(), index = col_double()))
+
+data %>%
+  mutate(date = yearquarter(date)) %>% 
+  as_tsibble(index = 'date') -> data   
+
+data
+
+```
+```{r}
+# create tsibbel object with index "date" and measured variable "index"
+ts <- data%>% as_tsibble(index = date)
+# create timeseries object
+timeseries <- ts(data = ts$hpi, frequency = 3)
+```
+
+
+###-------------------------###
+### Exploring & Visualizing ###
+###-------------------------###
+
+
+### Summary Statistics ###
+```{r}
+summary(data$hpi)
+data$date[which.min(data$date)]
+data$date[which.max(data$date)]
+```
+### Plotting Index over Time ###
+```{r}
+plot_ts <- ts %>%
+  autoplot(hpi) +
+  labs(y = "Index Value", title = "House Price Index in Oslo (1992 to 2023)", x = "Quarter") +
+  scale_x_yearquarter(date_breaks = "2 years", date_labels = "%Y")
+print(plot_ts)
+```
+Upward trend
+Cyclical tendencies (flucations that are not fixed)
+No visible distinct seasonal pattern, although there may seem like some seasonality is present
+Not a linear development, log or box cox transformation would be suitable to achieve more linearity
+
+```{r}
+plot_season1 <- ts %>%
+  gg_season(hpi, labels = "both") +
+  labs(y = "Index Value", x = "Quarter", title = "Seasonal Plot of House Price Index")
+print(plot_season1)
+```
+
+
+
+### Strengh of trend and seasonal components ###
+```{r}
+ts%>%
+  features(hpi, feat_stl)
+```
+```{r}
+struc_test <- ts %>% 
+  mutate(
+    Lag0 = hpi,
+    Lag1 = lag(hpi, 1)
+  )
+
+qlr <- Fstats(Lag0 ~ Lag1, data = as.ts(struc_test), from = 0.15)
+
+# Structural change test 
+test <- sctest(qlr, type = "supF")
+test
+bp <- breakpoints(qlr, alpha = 0.05)
+# Plot
+plot(qlr, main = "F Statistics")
+abline(h = 0.05, col = "red", lty = 2)  # 5% significance level
+lines(bp)
+```
+
+
+
+
+###-------------------###
+### Transforming Data ###
+###-------------------###
+
+### Log transformation  ###
+```{r}
+ts_log <- ts %>%
+  mutate(hpi = log(hpi))
+```
+
+### Box CoX transformation ###
+```{r}
+# Finding the optimal boxcox value with guerrero
+ts %>%
+  features(hpi, features = guerrero)
+
+guerrero_lambda = 0.316669
+guerrero_lambda
+```
+
+```{r}
+ts_bc <- ts %>%
+  mutate(hpi = box_cox(hpi, guerrero_lambda))
+```
+
+
+### Plotting normal. log and box cox transformations ###
+```{r}
+# Plot Log Transformed Data
+plot_ts_log <- ts_log %>%
+  autoplot(hpi) + # Change to EmpRate
+  labs(y = "Log Index Value", title = "Log House Price Index in Oslo (1992 to 2023)", x = "Quarter") +
+  scale_x_yearquarter(date_breaks = "2 years", date_labels = "%Y")
+
+plot_ts_bc <- ts_bc %>%
+  autoplot(hpi) + # Change to EmpRate
+  labs(y = "Box Cox Index Value", title = "Box Cox House Price Index in Oslo (1992 to 2023)", x = "Quarter") +
+  scale_x_yearquarter(date_breaks = "2 years", date_labels = "%Y")
+
+# Printing the plots before and after transformation
+print(plot_ts)
+print(plot_ts_log) 
+print(plot_ts_bc)
+```
+Fluctuations/potential seasonal patterns seem persistent in size over time
+```{r}
+ts%>%
+  features(hpi, feat_stl)
+ts_log%>%
+  features(hpi, feat_stl)
+ts_bc%>%
+  features(hpi, feat_stl)
+```
+The strength of trend and sesonal component decreases from .73 to .66 after box cox and to .61 after log transformation. However, the Box cox produces a slightly more linear graph than the logged data -> continue with box cox 
+
+###------------------###
+### Decomposing Data ###
+###------------------###
+
+### Additive Decomposition ###
+Since variation does not seem to increase very much over time -> classical add
+```{r}
+plot_decomp <- ts_bc %>%
+  model(classical_decomposition(hpi, type = "additive")) %>%
+  components() %>%
+  autoplot() +
+  labs(x = "Quarter", title = "Classical Additive Decomposition of Box-Cox Data") +
+  scale_x_yearmonth(date_breaks = "2 years", date_labels = "%Y")
+print(plot_decomp)
+```
+Sesonality appears consistent over time
+Trend component increases less concave and more linearly over time
+Random component does not exhibit very strong signs heteroskedasticity, variance is relatively stable over time
+
+
+Since the additive model assumes sesonal fluctuations over time to be of equal size, which is confirmed by the plot above, the additive method is the correct one. Otherwise, the magnitude of the seasonal component would vary with the level of the time series, often increasing or decreasing in size as the series grows or shrinks.Since the visual examination of the seasonal component suggests a constant pattern and magnitude, and since the additive decomposition appears to fit well, it's reasonable to conclude that the additive method is suitable for the data.
+
+
+### Examining Seasonal Pattern ###
+```{r}
+# Investigate Seasonality
+plot_season1 <- ts_bc %>%
+  gg_season(hpi, labels = "both") +
+  labs(y = "Index Value", x = "Quarter", title = "Seasonal Plot of Box-Cox House Price Index")
+print(plot_season1)
+```
+Difficult to discern a distinct quarterly pattern
+
+### Plot autocorrelation (correlogram) ###
+```{r}
+plot_autocor <- ts_bc %>%
+  ACF(lag_max = 36) %>%
+  autoplot() +
+  labs(y = "Autocorrelation", x = "Lag", title = "ACF: Box-Cox HPI")
+
+print(plot_autocor)
+```
+The data is trending and highly correlated, with a slow decline in AC with time and no visible seasonality in form of spike patterns. Autocorrelation is positive for all lags up until lag 36
+
+### Box-Pierce Test ###
+```{r}
+ts_bc %>%
+  features(hpi, box_pierce, lag=10, dof=0)
+```
+```{r}
+ts_bc %>%
+  PACF(hpi) %>% 
+  autoplot() +
+  labs(y = "PACF", x = "Lag", title = "PACF: Box-Cox HPI")
+```
+There's a strong correlation between the time series and its own first lag (indicative of autoregressive term of order 1absence of significant lags beyond lag 1 suggests that no higher-order autoregressive terms are needed). Insignificant Seasonality: no increased autocorrelation at lags 4, 8, and 12 and 24 supports a conclusion of no strong seasonal component. (noting absence of clear spikes in the ACF doesn't = that seasonality is entirely absent)
+
+In Summary:
+
+    The data seems to follow an AR(1) process, where each observation is significantly correlated with the immediately preceding one, but not with lags beyond that.
+    The correlations at higher lags in the ACF can be explained by the first lag, so no additional AR terms are needed.
+    There is no evidence of significant seasonal patterns in the data, based on the analysis of the ACF and PACF at typical seasonal lags.
+
+This analysis would guide the modeling approach, suggesting that a simple AR(1) model without seasonal terms could be appropriate for the data. The lack of significant seasonality also aligns with your earlier observation in the additive decomposition analysis, where the seasonal component's pattern and magnitude remained constant over time.
+
+###------------------###
+### Structural Break ###
+###------------------###
+
+```{r}
+struc_test <- ts_bc %>% 
+  mutate(
+    Lag0 = hpi,
+    Lag1 = lag(hpi, 1)
+  )
+
+qlr <- Fstats(Lag0 ~ Lag1, data = as.ts(struc_test), from = 0.15)
+
+# Structural change test 
+test <- sctest(qlr, type = "supF")
+test
+bp <- breakpoints(qlr, alpha = 0.05)
+# Plot
+plot(qlr, main = "F Statistics")
+abline(h = 0.05, col = "red", lty = 2)  # 5% significance level
+lines(bp)
+```
+0.7158 > 0.05, h0 cannot be rejected -> strong evidence and safe to assume no structural breaks, the potential breakpoint is not statistically significant and only the most likely place of sb in case it exists
+
+
+###--------------###
+### Stationarity ###
+###--------------###
+
+### Stationarity Tests ###
+
+### KPSS & TAU ###
+
+The KPSS test is used to test the null hypothesis that a series is stationary around a deterministic trend (type = "tau") or around a mean (type = "mu").
+```{r}
+
+summary(ur.kpss(ts_bc$hpi, type = "tau"))
+summary(ur.kpss(ts_bc$hpi, type = "mu"))
+```
+Tau: 0.211 > 0.146 = reject h0 -> not stationary around a deterministic trend
+Mu: 2.5803 > 0.463 = reject h0 -> not stationary around a mean
+
+-> supports differencing data 
+
+
+### Augmented Dickey-Fuller Test ###
+
+The ADF test is used to test the null hypothesis that a unit root is present in the time series (i.e., the series is non-stationary)
+
+### Test with trend ###
+```{r}
+summary(ur.df(ts_bc$hpi, type = "trend", selectlags = "AIC")) # deterministic trend
+summary(ur.df(ts_bc$hpi, type = "drift", selectlags = "AIC")) # stochastic trend
+summary(ur.df(ts_bc$hpi, type="none", selectlags="AIC")) # only unit root
+```
+
+
+
+### Differencing with 1 lag ###
+
+```{r}
+difference <- diff(ts_bc$hpi, lag = 1)
+ts_bc_diff_1 <- ts_bc[-(1:1), ]
+ts_bc_diff_1 <- ts_bc_diff_1 %>%
+  mutate(hpi = difference)
+```
+
+
+```{r}
+summary(ur.kpss(ts_bc_diff_1$hpi, type = "tau"))
+summary(ur.kpss(ts_bc_diff_1$hpi, type = "mu"))
+```
+```{r}
+summary(ur.df(ts_bc_diff_1$hpi, type = "trend", selectlags = "AIC"))
+summary(ur.df(ts_bc_diff_1$hpi, type = "drift", selectlags = "AIC"))
+summary(ur.df(ts_bc_diff_1$hpi, type="none", selectlags="AIC"))
+```
+```{r}
+ts_bc_diff_1 %>%
+  autoplot()
+```
+
+
+
+```{r}
+struc_test <- ts_bc_diff_1 %>% 
+  mutate(
+    Lag0 = hpi,
+    Lag1 = lag(hpi, 1)
+  )
+
+qlr <- Fstats(Lag0 ~ Lag1, data = as.ts(struc_test), from = 0.15)
+
+# Structural change test 
+test <- sctest(qlr, type = "supF")
+test
+bp <- breakpoints(qlr, alpha = 0.05)
+# Plot
+plot(qlr, main = "F Statistics")
+abline(h = 0.05, col = "red", lty = 2)  # 5% significance level
+lines(bp)
+```
+
+
+
+
+
+
+### Selecting lags for ARIMA with ACF/PACF ###
+
+```{r}
+ts_bc_diff_1 %>% 
+  gg_tsdisplay(hpi, plot_type = "partial", lag_max=36)
+```
+
+
+```{r}
+lag_max = 48
+acf_values <- Acf(ts_bc_diff_1$hpi, lag.max = lag_max)
+pacf_values <- Pacf(ts_bc_diff_1$hpi, lag.max = lag_max)
+print(acf_values)
+print(pacf_values)
+```
+
+
+###--------------------------------###
+### Splitting into training & test ###
+###--------------------------------###
+```{r}
+size = 0.8
+
+train_size = round(count(ts)$n * size)
+test_size = train_size + 1
+
+train_size
+test_size
+```
+### Training & Test: Original Data ###
+```{r}
+train_ts <- ts %>%
+  arrange(date) %>%
+  slice(1:train_size) %>%
+  na.omit()
+train_ts <- train_ts %>% as_tsibble()
+
+test_ts <- ts %>%
+  arrange(date) %>%
+  slice(test_size:n()) %>%
+  na.omit()
+test_ts <- test_ts %>% as_tsibble()
+
+train_ts
+test_ts
+```
+
+### Training & Test: BC data ###
+```{r}
+train_ts_bc <- ts_bc %>%
+  arrange(date) %>%
+  slice(1:train_size) %>%
+  na.omit()
+train_ts_bc <- train_ts_bc %>% as_tsibble()
+
+test_ts_bc <- ts_bc %>%
+  arrange(date) %>%
+  slice(test_size:n()) %>%
+  na.omit()
+test_ts_bc <- test_ts_bc %>% as_tsibble()
+
+train_ts_bc
+test_ts_bc
+```
+
+
+###------------###
+### ETS Models ###
+###------------###
+
+
+### Creating and forecasting models ###
+```{r}
+# Holt-Winters' method, additive
+ets_1 <- train_ts_bc %>%
+  model(ETS(hpi ~ error("A") + trend("A") + season("A")))
+
+# Additive damped trend, so see if seasonal comp is negbile
+ets_2 <- train_ts_bc %>%
+  model(ETS(hpi ~ error("A") + trend("A") + season("N")))
+
+# auto
+ets_3 <- train_ts_bc %>%
+  model(ETS(hpi))
+print(ets_3)
+
+forecast_ets_1_bc <- ets_1 %>%
+  fabletools::forecast(h=nrow(test_ts_bc))
+
+forecast_ets_2_bc <- ets_2 %>%
+  fabletools::forecast(h=nrow(test_ts_bc))
+
+forecast_ets_3_bc <- ets_3 %>%
+  fabletools::forecast(h=nrow(test_ts_bc))
+```
+
+### Reporting ###
+```{r}
+report(ets_1)
+report(ets_2)
+report(ets_3)
+```
+
+
+
+### Plotting residuals ###
+```{r}
+print(gg_tsresiduals(ets_1, type = "innovation"))
+print(gg_tsresiduals(ets_2, type = "innovation"))
+print(gg_tsresiduals(ets_3, type = "innovation"))
+```
+### Residuals and Ljung box ###
+```{r}
+ets_1_redisudals <- ets_1 %>%
+  residuals() %>%
+  features(.resid, features = ljung_box, lag = 10, dof = 4)
+print(ets_1_redisudals)
+
+ets_2_redisudals <- ets_2 %>%
+  residuals() %>%
+  features(.resid, features = ljung_box, lag = 10, dof = 2)
+print(ets_2_redisudals)
+```
+
+the model with lowest accuracy score: very low p-value  strongly suggest significant AC in residuals = red flag in terms of generalizability
+-> opt for AAA model
+
+
+### Forecasting ###
+```{r}
+# Converting back to org scale
+forecast_ets_1 <- forecast_ets_1_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+forecast_ets_2 <- forecast_ets_2_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+forecast_ets_3 <- forecast_ets_3_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+# Converting to tsibble
+ts_ets_1 <- forecast_ets_1%>% as_tsibble(index = date)
+ts_ets_2 <- forecast_ets_2%>% as_tsibble(index = date)
+ts_ets_3 <- forecast_ets_3%>% as_tsibble(index = date)
+
+
+plot_ets_1 <- forecast_ets_1 %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red") +
+  labs(y = "HPI", title = "ETS(A,A,A)") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_ets_1)
+
+plot_ets_2 <- forecast_ets_2 %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red") +
+  labs(y = "HPI", title = "ets_2") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_ets_2)
+
+plot_ets_3 <- forecast_ets_3 %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red") +
+  labs(y = "HPI", title = "ets_3") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_ets_3)
+```
+```{r}
+shapiro.test((ets_1) %>%
+               augment() %>% 
+               select(.innov) %>% 
+               as.ts())
+shapiro.test((ets_2) %>%
+               augment() %>% 
+               select(.innov) %>% 
+               as.ts())
+shapiro.test((ets_3) %>%
+               augment() %>% 
+               select(.innov) %>% 
+               as.ts())
+```
+h0 = data follow a residuals distribution
+fail to reject h0 for all models
+
+### Get parameters of ETS model ###
+```{r}
+tidy(ets_3)
+tidy(ets_2)
+```
+### Accuracy ###
+```{r}
+# evaluating the forecast accuracy on the same scale as the data the model was trained on
+ets_accuracies <- bind_rows(
+  forecast_ets_1_bc %>% fabletools::accuracy(ts_bc),
+  forecast_ets_2_bc %>% fabletools::accuracy(ts_bc),
+  forecast_ets_3_bc %>% fabletools::accuracy(ts_bc) %>%
+  select(-ME, -MPE, -ACF1,-RMSSE))
+
+print(ets_accuracies)
+```
+
+### Forecasting with selected ETS model ###
+```{r}
+plot_ets_1_f <- forecast_ets_1 %>%
+  autoplot() +
+  geom_line(aes(y = hpi, x = date(), color = "Test"), data = test_ts) +
+  geom_line(aes(y = hpi, x = date, color = "Training"), data = train_ts) +
+  geom_line(aes(y = .mean, x = date, color = "Forecast"), data = ts_ets_1) +
+  scale_color_manual(name = "Data", values = c(Test = "red", Training = "black", Forecast = "blue")) +
+  labs(y = "hpi", title = "ETS(A,A,A)") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+
+print(plot_ets_1_f)
+```
+
+
+
+###--------------###
+### ARIMA Models ###
+###--------------###
+
+### Forecasting ###
+```{r}
+# arima_model_1 = (6, 1, 0)(1, 1, 1, 4)
+arima_1 <- train_ts_bc %>% model(ARIMA(hpi ~  0 + pdq(6,1,0) + PDQ(1,1,1, 4)))
+forecast_arima_1_bc <- arima_1 %>%
+  fabletools::forecast(h=nrow(test_ts_bc))
+
+# arima auto =  ARIMA(1,1,0)(1,0,1)[4] w/ drift
+arima_auto <- train_ts_bc %>% model(arima_auto = ARIMA(hpi))
+print(arima_auto)
+forecast_arima_auto_bc <- arima_auto %>%
+  fabletools::forecast(h=nrow(test_ts_bc))
+```
+### Reporting ###
+```{r}
+report(arima_1)
+report(arima_auto)
+```
+- the auto model has the lowest(best) scores
+
+### Ljung-Box Test ###
+```{r}
+arima_1_redisudals<- arima_1 %>%
+  residuals() %>%
+  features(.resid, features = ljung_box, lag = 24, dof = 8)
+print(arima_1_redisudals)
+
+arima_auto_redisudals <- arima_auto %>%
+  residuals() %>%
+  features(.resid, features = ljung_box, lag = 24, dof = 3)
+print(arima_auto_redisudals)
+```
+the auto model fails the test -> 0.0409 < 0.05 = indicating that the residuals are not independent. not the case for the other models
+
+### Shapiro test ###
+
+```{r}
+shapiro.test((arima_1) %>%
+               augment() %>% 
+               select(.innov) %>% 
+               as.ts())
+shapiro.test((arima_auto) %>%
+               augment() %>% 
+               select(.innov) %>% 
+               as.ts())
+```
+
+
+### Plot Residuals ###
+```{r}
+# arima_model_1 = (3, 1, 1)(0, 1, 2)4
+gg_tsresiduals(arima_1, type = "innovation")+
+labs(title = "Analysis of Residuals for ARIMA(3, 1, 1)(0, 1, 2)4")
+
+# arima auto
+gg_tsresiduals(arima_auto, type = "innovation")+
+labs(title = "Analysis of Residuals for Automatic ARIMA")
+```
+- residuals look random
+- no spikes vs 1 (of 20) lags show minor AC, may be ignored
+- aprox normal distribution with a slight tail vs wierd distribution for auto
+
+-> favor arima_312_0134 (scores slightly worse on AIC,AICc and BIC) 
+
+
+### Converting back to original scale ###
+```{r}
+invboxcox <- function(y, lambda) {
+  if(lambda == 0) {
+    return(exp(y))
+  } else {
+    return((lambda * y + 1)^(1/lambda))
+  }
+}
+
+# Converting back to org scale
+forecast_arima_1 <- forecast_arima_1_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+forecast_arima_auto <- forecast_arima_auto_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+# Converting to tsibble
+ts_arima_1 <- forecast_arima_1%>% as_tsibble(index = date)
+ts_arima_auto<- forecast_arima_auto%>% as_tsibble(index = date)
+```
+
+### Plotting forecasts ###
+```{r}
+plot_arima_1 <- forecast_arima_1 %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red") +
+  labs(y = "HPI", title = "ARIMA(6,1,1)(1,1,1)4") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_arima_1)
+
+plot_arima_auto <- forecast_arima_auto %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red") +
+  labs(y = "HPI", title = "ARIMA(1,1,0)(1,0,1)[4] w/ drift") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_arima_auto)
+```
+### Benchmark Model ###
+```{r}
+# Drift model
+drift_model <- train_ts_bc %>% model(DRIFT = TSLM(hpi ~ trend()))
+
+# Forecast with the drift model
+forecast_drift_bc <- drift_model %>%
+  fabletools::forecast(h = nrow(test_ts_bc))
+
+# Converting back to org scale
+forecast_drift <- forecast_drift_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+
+# Converting to tsibble
+ts_drift <- forecast_drift%>% as_tsibble(index = date)
+
+plot_drift <- forecast_drift %>%
+  autoplot(test_ts) +
+  geom_line(aes(y = hpi, x = date),data = test_ts, color = "red", size = 1.5) +
+  labs(y = "HPI", title = "Drift Model") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_drift)
+
+```
+
+```{r}
+plot_drift <- forecast_drift %>%
+  autoplot(train_ts) +
+  geom_line(aes(y = hpi, x = date), data = test_ts, color = "red") +  # Adjust the size value for test_ts line
+  labs(y = "HPI", title = "Drift Model") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y")
+print(plot_drift)
+```
+
+
+
+### Accuracy ###
+```{r}
+# evaluating the forecast accuracy on the same scale as the data the model was trained on
+arima_accuracies <- bind_rows(
+  forecast_arima_1_bc %>% fabletools::accuracy(ts_bc),
+  forecast_arima_auto_bc %>% fabletools::accuracy(ts_bc) %>%
+  select(-ME, -MPE, -ACF1,-RMSSE))
+
+print(arima_accuracies)
+```
+The first manual ARIMA model performs best across all metrics, although very similar to the second manual model, and delivers a much better performance in terms of accuracy metrics.
+
+###---------------------------------###
+### Comparing all models + baseline ###
+###---------------------------------###
+
+```{r}
+all_accuracies <- bind_rows(
+  forecast_ets_1_bc %>% fabletools::accuracy(ts_bc),
+  forecast_arima_1_bc %>% fabletools::accuracy(ts_bc),
+  forecast_drift_bc %>% fabletools::accuracy(ts_bc))
+
+print(all_accuracies)
+
+
+```
+
+
+
+### Forecasting to 2033 ###
+```{r}
+horizon = 20 # forecasting to 2028, second quarter
+
+# predicting with best model
+best_model <- ts_bc %>% model(ARIMA(hpi ~ 0 + pdq(6,1,0) + PDQ(1,1,1,4)))
+#best_ets_model <- ts_bc %>% model(ETS(hpi ~ error("A") + trend("A") + season("A")))
+
+# forecasting
+forecast_best_model_bc <- best_model %>%
+  fabletools::forecast(h=(horizon))
+#forecast_best_ets_model_bc <- best_ets_model %>%
+#  fabletools::forecast(h=(horizon))
+
+
+# transforming to org scale
+forecast_best_model <- forecast_best_model_bc %>%
+  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+         hpi = invboxcox(hpi, guerrero_lambda))
+#forecast_best_ets_model <- forecast_best_ets_model_bc %>%
+#  mutate(.mean = invboxcox(.mean, guerrero_lambda),
+#         hpi = invboxcox(hpi, guerrero_lambda))
+
+# convert to tsibble
+ts_best_model_predict <- forecast_best_model%>% as_tsibble(index = date)
+#ts_best_ets_predict <- forecast_best_ets_model%>% as_tsibble(index = Date)
+
+```
+
+```{r}
+ts_best_model_predict
+```
+
+```{r}
+last_forecasted_value <- ts_best_model_predict %>%
+  tail(1) %>%
+  pull(.mean)
+last_forecasted_value
+```
+
+
+```{r}
+plot_summary_2033 <- autoplot(ts) +
+  geom_line(aes(y = hpi, x = date, color = "Training"), data = ts) +
+  geom_line(aes(y = .mean, x = date, color = "ARIMA(6,1,0)(1,1,1)4"), data = ts_best_model_predict) +
+  scale_color_manual(name = "", values = c("Training" = "black", "ARIMA(0,1,13)(0,1,0)12" = "steelblue1")) +
+  labs(x = "Month", y = "House Price Index", title = "Forecast of House Price Index: 2023 - 2033") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y") +
+  theme(legend.position = "bottom")
+
+print(plot_summary_2033)
+
+```
+
+```{r}
+plot_summary <- autoplot(test_ts) +
+  geom_line(aes(y = hpi, x = date, color = "Test"), data = test_ts) +
+  geom_line(aes(y = hpi, x = date, color = "Training"), data = test_ts) +
+  geom_line(aes(y = .mean, x = date, color = "ETS Forecast"), data = ts_ets_1, level = NULL) +
+  geom_line(aes(y = .mean, x = date, color = "ARIMA Forecast"), data = ts_arima_1) +
+  geom_line(aes(y = .mean, x = date, color = "Drift Forecast"), data = forecast_drift, level = NULL)+
+  scale_color_manual(name = "Data", values = c(
+    "Test" = "orange", "Training" = "black", "ETS Forecast" = "seagreen",
+    "ARIMA Forecast" = "steelblue1", "Drift Forecast" = "indianred1")) +
+  labs(x = "Month", y = "Employment Rate", title = "Past and Forecast of Female Employment Rate (January)") +
+  scale_x_yearmonth(date_breaks = "5 years", date_labels = "%Y") +
+  theme(legend.position = "bottom")
+
+print(plot_summary)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
